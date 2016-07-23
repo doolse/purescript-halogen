@@ -405,6 +405,17 @@ mapStateFChild p =
       , children: M.update (\child -> Just { component: child.component, state: f child.state, memo: Nothing }) p st.children
       })
 
+type InstallState s' f f' g p = {
+    children:: M.Map p (ChildState s' f f' g p)
+  , removed :: M.Map p (ChildState s' f f' g p)
+  , hooks:: Array (Hook (ParentQuery f f' p) g)
+  }
+
+type SlotCreator h = forall a b. a -> h a b
+type InstallChild h s' f f' g p st = SlotCreator h
+  -> RawSlotConstructor h s' f' g p -> st
+  -> Tuple (HTML (Tree (ParentQuery f f' p) p) (ParentQuery f f' p Unit)) st
+
 renderParent
   :: forall s s' f f' g p
    . (Ord p)
@@ -412,7 +423,7 @@ renderParent
   -> (ParentState s s' f f' g p)
   -> RenderResult HTML (ParentState s s' f f' g p) (ParentQuery f f' p) g
 renderParent render (ParentState curr) =
-  case install (render curr.parent) init of
+  case install (render curr.parent) init installChild of
     Tuple html acc ->
       { state: ParentState { parent: curr.parent, children: acc.children }
       , hooks: foldMap finalizeChild acc.removed <> acc.hooks
@@ -421,20 +432,27 @@ renderParent render (ParentState curr) =
 
   where
 
+  init :: InstallState s' f f' g p
   init =
     { children: M.empty
     , removed: curr.children
     , hooks: []
     }
 
-  install (Text s) st = Tuple (Text s) st
-  install (Slot p) st = installChild p st
-  install (Element ns name props els) st = runPure $ runST do
+  -- HTML (RawSlotConstructor h s' f' g p) (f Unit)
+
+  install :: forall st. ParentRendered HTML s' f f' g p
+      -> st
+      -> InstallChild HTML s' f f' g p st
+      -> Tuple (HTML (Tree (ParentQuery f f' p) p) (ParentQuery f f' p Unit)) st
+  install (Text s) st _ = Tuple (Text s) st
+  install (Slot p) st ic = ic Slot p st
+  install (Element ns name props els) st ic = runPure $ runST do
     arr <- A.emptySTArray
     acc <- newSTRef st
     foreachE els \el -> do
       st' <- readSTRef acc
-      case install el st' of
+      case install el st' ic of
         Tuple el' st'' -> do
           void $ A.pushSTArray arr el'
           void $ writeSTRef acc st''
@@ -448,7 +466,10 @@ renderParent render (ParentState curr) =
   finalizeChild child =
     map Finalized $ finalizeComponent child.component child.state
 
-  installChild (RawSlotConstructor p def) { hooks, removed, children } =
+  installChild :: SlotCreator HTML
+    -> RawSlotConstructor HTML s' f' g p -> InstallState s' f f' g p
+    -> Tuple (HTML (Tree (ParentQuery f f' p) p) (ParentQuery f f' p Unit)) (InstallState s' f f' g p)
+  installChild slot (RawSlotConstructor p def) { hooks, removed, children } =
     case M.lookup p curr.children of
       Just child' ->
         renderChild Nothing child'
@@ -470,7 +491,7 @@ renderParent render (ParentState curr) =
       }
 
     renderChild _ c@{ memo : Just tree } =
-      Tuple (Slot $ thunkTree tree) (update [] c)
+      Tuple (slot $ thunkTree tree) (update [] c)
 
     renderChild hook c =
       let r = renderComponent c.component c.state
@@ -480,7 +501,7 @@ renderParent render (ParentState curr) =
           adapt :: f' ~> Coproduct f (ChildF p f')
           adapt a = right (ChildF p a)
       in
-          Tuple (Slot tree) $ update hooks'
+          Tuple (slot tree) $ update hooks'
             { component: c.component
             , state: r.state
             , memo: Just tree
