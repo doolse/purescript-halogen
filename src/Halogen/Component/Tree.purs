@@ -1,8 +1,9 @@
 module Halogen.Component.Tree
   ( Tree
   , TreeF
+  , class RenderedTree
+  , initialTree
   , mkTree
-  , mkTree'
   , runTree
   , graftTree
   , thunkTree
@@ -23,6 +24,18 @@ type TreeF f p p' =
   }
 
 foreign import data Tree :: (* -> *) -> * -> *
+
+class RenderedTree h where
+  initialTree :: forall f. h Void (f Unit) -> Tree f Unit
+
+instance htmlTree :: RenderedTree HTML where
+  initialTree html = mkTree'
+      { slot: unit
+      , html: defer \_ -> unsafeCoerce html -- Safe because p is Void
+      , eq: \_ _ -> false -- Absurd
+      , thunk: false
+      }
+
 
 mkTree :: forall f p'. Eq p' => Lazy (HTML (Tree f p') (f Unit)) -> Tree f Unit
 mkTree html =
