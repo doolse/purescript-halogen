@@ -18,18 +18,14 @@ module Halogen.Internal.VirtualDOM
   ) where
 
 import Prelude
-
 import Control.Monad.Eff (Eff)
-
-import Data.Monoid (class Monoid)
-import Data.Maybe (Maybe(..))
-import Data.Nullable (Nullable)
-import Data.Function.Uncurried (Fn2, runFn2)
-
 import DOM (DOM)
 import DOM.HTML.Types (HTMLElement)
-
-import Halogen.Component.Tree (Tree)
+import Data.Function.Uncurried (Fn2, runFn2)
+import Data.Maybe (Maybe(..))
+import Data.Monoid (class Monoid)
+import Data.Nullable (Nullable)
+import Halogen.RenderDSL (Tree)
 
 -- | Virtual DOM nodes
 data VTree

@@ -50,11 +50,8 @@ import Prelude
 import Control.Monad.Free.Trans as FT
 import Data.List as L
 import Data.Map as M
-import Control.Monad.Eff (runPure, foreachE)
 import Control.Monad.Free (Free, foldFree, liftF, hoistFree)
-import Control.Monad.ST (runST, newSTRef, readSTRef, writeSTRef)
 import Data.Array (cons) as A
-import Data.Array.ST (emptySTArray, pushSTArray, STArray) as A
 import Data.Bifunctor (lmap)
 import Data.Foldable (foldMap, for_)
 import Data.Functor.Coproduct (Coproduct, coproduct, left, right)
@@ -64,14 +61,13 @@ import Data.Traversable (for, traverse)
 import Data.Tuple (Tuple(..))
 import Halogen.Component.ChildPath (ChildPath(..), injState, injQuery, injSlot, prjState, prjQuery, prjSlot)
 import Halogen.Component.Hook (Hook(..), Finalized, finalized, mapFinalized, lmapHook, rmapHook)
-import Halogen.Component.Tree (initialTree, Tree, class RenderedTree, mkTree, graftTree, thunkTree, emptyTree)
-import Halogen.HTML.Core (HTML(..))
+import Halogen.HTML.Core (mkTree, graftTree, thunkTree, emptyTree, HTML)
 import Halogen.Query (get, liftH)
 import Halogen.Query.EventSource (EventSource(..), ParentEventSource, runEventSource, fromParentEventSource)
 import Halogen.Query.HalogenF (HalogenF, HalogenFP(..), RenderPending(..), hoistHalogenF, transformHF)
 import Halogen.Query.StateF (StateF(..), mapState)
+import Halogen.RenderDSL (class RenderDSL, Tree, installChildren, initialTree)
 import Partial.Unsafe (unsafePartial)
-import Unsafe.Coerce (unsafeCoerce)
 
 type RenderResult (h :: * -> * -> *) s f g =
   { state :: s
@@ -116,7 +112,7 @@ type RawComponentSpec h s f g =
 type ComponentSpec s f g = RawComponentSpec HTML s f g
 
 -- | Builds a self-contained component with no possible children.
-component :: forall h s f g. (RenderedTree h) => RawComponentSpec h s f g -> RawComponent h s f g
+component :: forall h s f g. (RenderDSL h) => RawComponentSpec h s f g -> RawComponent h s f g
 component spec =
   lifecycleComponent
     { render: spec.render
@@ -137,7 +133,7 @@ type LifecycleComponentSpec s f g = RawLifecycleComponentSpec HTML s f g
 
 -- | Builds a self-contained component with lifecycle inputs and no possible
 -- | children.
-lifecycleComponent :: forall h s f g. RenderedTree h => RawLifecycleComponentSpec h s f g -> RawComponent h s f g
+lifecycleComponent :: forall h s f g. RenderDSL h => RawLifecycleComponentSpec h s f g -> RawComponent h s f g
 lifecycleComponent spec =
     RawComponent { render: \s -> { state: s, hooks: [], tree: renderTree (spec.render s) }
     , eval: spec.eval
@@ -411,11 +407,6 @@ type InstallState s' f f' g p = {
   , hooks:: Array (Hook (ParentQuery f f' p) g)
   }
 
-type SlotCreator h = forall a b. a -> h a b
-type InstallChild h s' f f' g p st = SlotCreator h
-  -> RawSlotConstructor h s' f' g p -> st
-  -> Tuple (HTML (Tree (ParentQuery f f' p) p) (ParentQuery f f' p Unit)) st
-
 renderParent
   :: forall s s' f f' g p
    . (Ord p)
@@ -423,7 +414,7 @@ renderParent
   -> (ParentState s s' f f' g p)
   -> RenderResult HTML (ParentState s s' f f' g p) (ParentQuery f f' p) g
 renderParent render (ParentState curr) =
-  case install (render curr.parent) init installChild of
+  case installChildren installChild left (render curr.parent) init of
     Tuple html acc ->
       { state: ParentState { parent: curr.parent, children: acc.children }
       , hooks: foldMap finalizeChild acc.removed <> acc.hooks
@@ -439,36 +430,9 @@ renderParent render (ParentState curr) =
     , hooks: []
     }
 
-  -- HTML (RawSlotConstructor h s' f' g p) (f Unit)
-
-  install :: forall st. ParentRendered HTML s' f f' g p
-      -> st
-      -> InstallChild HTML s' f f' g p st
-      -> Tuple (HTML (Tree (ParentQuery f f' p) p) (ParentQuery f f' p Unit)) st
-  install (Text s) st _ = Tuple (Text s) st
-  install (Slot p) st ic = ic Slot p st
-  install (Element ns name props els) st ic = runPure $ runST do
-    arr <- A.emptySTArray
-    acc <- newSTRef st
-    foreachE els \el -> do
-      st' <- readSTRef acc
-      case install el st' ic of
-        Tuple el' st'' -> do
-          void $ A.pushSTArray arr el'
-          void $ writeSTRef acc st''
-    acc' <- readSTRef acc
-    pure $ Tuple (Element ns name (map left <$> props) $ unsafeFreeze arr) acc'
-
-  -- Prevents an unnecessary array copy
-  unsafeFreeze :: forall h a. A.STArray h a -> Array a
-  unsafeFreeze = unsafeCoerce
-
   finalizeChild child =
     map Finalized $ finalizeComponent child.component child.state
 
-  installChild :: SlotCreator HTML
-    -> RawSlotConstructor HTML s' f' g p -> InstallState s' f f' g p
-    -> Tuple (HTML (Tree (ParentQuery f f' p) p) (ParentQuery f f' p Unit)) (InstallState s' f f' g p)
   installChild slot (RawSlotConstructor p def) { hooks, removed, children } =
     case M.lookup p curr.children of
       Just child' ->

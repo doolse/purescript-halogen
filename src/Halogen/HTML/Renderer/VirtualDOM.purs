@@ -4,11 +4,10 @@ module Halogen.HTML.Renderer.VirtualDOM
   ) where
 
 import Prelude
-
-import Control.Monad.Aff (Aff(), runAff)
-import Control.Monad.Eff (Eff())
+import Halogen.Internal.VirtualDOM as V
+import Control.Monad.Aff (Aff, runAff)
+import Control.Monad.Eff (Eff)
 import Control.Monad.Eff.Exception (throwException)
-
 import Data.Exists (runExists)
 import Data.ExistsR (runExistsR)
 import Data.Foldable (foldl, foldMap)
@@ -17,12 +16,10 @@ import Data.Lazy (force)
 import Data.Maybe (Maybe(..), maybe)
 import Data.Monoid (mempty)
 import Data.Nullable (toNullable)
-
-import Halogen.Effects (HalogenEffects())
-import Halogen.Component.Tree (Tree(), runTree)
-import Halogen.HTML.Core (HTML(..), Prop(..), PropF(..), HandlerF(..), runNamespace, runTagName, runPropName, runAttrName, runEventName)
+import Halogen.Effects (HalogenEffects)
+import Halogen.HTML.Core (HTML(..), Prop(..), PropF(..), HandlerF(..), runNamespace, runTagName, runPropName, runAttrName, runEventName, runTree)
 import Halogen.HTML.Events.Handler (runEventHandler)
-import Halogen.Internal.VirtualDOM as V
+import Halogen.RenderDSL (Tree)
 
 -- | Render a `HTML` document to a virtual DOM node
 -- |
