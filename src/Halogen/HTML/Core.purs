@@ -37,10 +37,6 @@ module Halogen.HTML.Core
   , className
   , runClassName
 
-  , emptyTree
-  , thunkTree
-  , graftTree
-  , mkTree
   , runTree
   ) where
 
@@ -225,6 +221,11 @@ instance htmlTree :: RenderDSL HTML where
       , thunk: false
       }
 
+  thunkTree = doThunkTree
+  emptyTree = doEmptyTree
+  makeTree = mkTree
+  graftTree = doGraftTree
+
   installChildren child c = go
     where
       go (Text s) st = Tuple (Text s) st
@@ -252,6 +253,16 @@ type TreeF f p p' =
   , thunk :: Boolean
   }
 
+
+doGraftTree :: forall f f' p p'. f ~> f' -> (p -> p') -> Tree f p -> Tree f' p'
+doGraftTree l r = runTree \t ->
+  mkTree'
+    { slot: r t.slot
+    , html: bimap (doGraftTree l id) l <$> t.html
+    , eq: t.eq
+    , thunk: t.thunk
+    }
+
 mkTree :: forall f p'. Eq p' => Lazy (HTML (Tree f p') (f Unit)) -> Tree f Unit
 mkTree html =
   mkTree'
@@ -267,20 +278,11 @@ mkTree' = unsafeCoerce
 runTree :: forall f p r. (forall p'. TreeF f p p' -> r) -> Tree f p -> r
 runTree k t = case unsafeCoerce t of tree -> k tree
 
-graftTree :: forall f f' p p'. f ~> f' -> (p -> p') -> Tree f p -> Tree f' p'
-graftTree l r = runTree \t ->
-  mkTree'
-    { slot: r t.slot
-    , html: bimap (graftTree l id) l <$> t.html
-    , eq: t.eq
-    , thunk: t.thunk
-    }
+doThunkTree :: forall f p. Tree f p -> Tree f p
+doThunkTree = runTree (mkTree' <<< _ { thunk = true })
 
-thunkTree :: forall f p. Tree f p -> Tree f p
-thunkTree = runTree (mkTree' <<< _ { thunk = true })
-
-emptyTree :: forall f. Tree f Unit
-emptyTree =
+doEmptyTree :: forall f. Tree f Unit
+doEmptyTree =
   mkTree'
     { slot: unit
     , html: defer \_ -> Text ""

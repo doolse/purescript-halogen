@@ -15,6 +15,7 @@ module Halogen.Component
   , RawSlotConstructor(..)
   , SlotConstructor
   , ParentQuery
+  , RawParentDSL
   , ParentDSL
   , RawParentComponentSpec
   , ParentComponentSpec
@@ -22,10 +23,12 @@ module Halogen.Component
   , RawLifecycleParentComponentSpec
   , LifecycleParentComponentSpec
   , lifecycleParentComponent
+  , RawParentState
   , ParentState
   , parentState
   , ChildF(..)
   , runChildF
+  , RawQueryF
   , QueryF
   , mkQuery
   , mkQuery'
@@ -61,12 +64,12 @@ import Data.Traversable (for, traverse)
 import Data.Tuple (Tuple(..))
 import Halogen.Component.ChildPath (ChildPath(..), injState, injQuery, injSlot, prjState, prjQuery, prjSlot)
 import Halogen.Component.Hook (Hook(..), Finalized, finalized, mapFinalized, lmapHook, rmapHook)
-import Halogen.HTML.Core (mkTree, graftTree, thunkTree, emptyTree, HTML)
+import Halogen.HTML.Core (HTML)
 import Halogen.Query (get, liftH)
 import Halogen.Query.EventSource (EventSource(..), ParentEventSource, runEventSource, fromParentEventSource)
 import Halogen.Query.HalogenF (HalogenF, HalogenFP(..), RenderPending(..), hoistHalogenF, transformHF)
 import Halogen.Query.StateF (StateF(..), mapState)
-import Halogen.RenderDSL (class RenderDSL, Tree, installChildren, initialTree)
+import Halogen.RenderDSL (SlotCreator, class RenderDSL, Tree, installChildren, initialTree, makeTree, graftTree, emptyTree, thunkTree)
 import Partial.Unsafe (unsafePartial)
 
 type RenderResult (h :: * -> * -> *) s f g =
@@ -75,14 +78,25 @@ type RenderResult (h :: * -> * -> *) s f g =
   , tree  :: Tree f Unit
   }
 
-emptyResult :: forall s f g. s -> RenderResult HTML s f g
+foreign import data H :: (* -> *) -> * -> *
+
+type Component s f g = RawComponent HTML s f g
+type ComponentHTML f = ComponentRendered HTML f
+type ParentState s s' f f' g p = RawParentState HTML s s' f f' g p
+type ChildState s' f f' g p = RawChildState HTML s' f f' g p
+type LifecycleComponentSpec s f g = RawLifecycleComponentSpec HTML s f g
+type ComponentSpec s f g = RawComponentSpec HTML s f g
+type ParentHTML s' f f' g p = ParentRendered HTML s' f f' g p
+type SlotConstructor s' f' g p = RawSlotConstructor HTML s' f' g p
+type ParentDSL s s' f f' g p = RawParentDSL HTML s s' f f' g p
+
+emptyResult :: forall h s f g. s -> RenderResult h s f g
 emptyResult state =
   { state
   , hooks: []
   , tree: emptyTree
   }
 
-type Component s f g = RawComponent HTML s f g
 -- | Data type for Halogen components.
 -- | - `s` - the component's state
 -- | - `f` - the component's query algebra
@@ -95,21 +109,17 @@ newtype RawComponent h s f g = RawComponent
   , finalizers :: s -> Array (Finalized g)
   }
 
-type ComponentRendered h f = h Void (f Unit)
-
 -- | The type for `HTML` rendered by a self-contained component.
-type ComponentHTML f = ComponentRendered HTML f
+type ComponentRendered h f = h Void (f Unit)
 
 -- | The DSL used in the `eval` function for self-contained components.
 type ComponentDSL s f g = Free (HalogenF s f g)
 
+-- | A spec for a HTML component.
 type RawComponentSpec h s f g =
   { render :: s -> ComponentRendered h f
   , eval :: f ~> ComponentDSL s f g
   }
-
--- | A spec for a HTML component.
-type ComponentSpec s f g = RawComponentSpec HTML s f g
 
 -- | Builds a self-contained component with no possible children.
 component :: forall h s f g. (RenderDSL h) => RawComponentSpec h s f g -> RawComponent h s f g
@@ -129,7 +139,6 @@ type RawLifecycleComponentSpec h s f g =
   , finalizer :: Maybe (f Unit)
   }
 
-type LifecycleComponentSpec s f g = RawLifecycleComponentSpec HTML s f g
 
 -- | Builds a self-contained component with lifecycle inputs and no possible
 -- | children.
@@ -146,22 +155,20 @@ lifecycleComponent spec =
 
 -- | The type for `HTML` rendered by a parent component.
 type ParentRendered h s' f f' g p = h (RawSlotConstructor h s' f' g p) (f Unit)
-type ParentHTML s' f f' g p = ParentRendered HTML s' f f' g p
 
 -- | The type used for slots in the HTML rendered by parent components.
 data RawSlotConstructor h s' f' g p = RawSlotConstructor p (Unit -> { component :: RawComponent h s' f' g, initialState :: s' })
-type SlotConstructor s' f' g p = RawSlotConstructor HTML s' f' g p
 
 -- | The type for nested queries.
 type ParentQuery f f' p = Coproduct f (ChildF p f')
 
 -- | The DSL used in the `eval` and `peek` functions for parent components.
-type ParentDSL s s' f f' g p = Free (HalogenFP ParentEventSource s f (QueryF s s' f f' g p))
+type RawParentDSL h s s' f f' g p = Free (HalogenFP ParentEventSource s f (RawQueryF h s s' f f' g p))
 
 type RawParentComponentSpec h s s' f f' g p =
   { render :: s -> ParentRendered h s' f f' g p
-  , eval :: f ~> ParentDSL s s' f f' g p
-  , peek :: forall x. Maybe (ChildF p f' x -> ParentDSL s s' f f' g p Unit)
+  , eval :: f ~> RawParentDSL h s s' f f' g p
+  , peek :: forall x. Maybe (ChildF p f' x -> RawParentDSL h s s' f f' g p Unit)
   }
 
 -- | A full spec for a parent component.
@@ -169,10 +176,10 @@ type ParentComponentSpec s s' f f' g p = RawParentComponentSpec HTML s s' f f' g
 
 -- | Builds a component that may contain child components.
 parentComponent
-  :: forall s s' f f' g p
-   . (Functor g, Ord p)
-  => ParentComponentSpec s s' f f' g p
-  -> Component (ParentState s s' f f' g p) (ParentQuery f f' p) g
+  :: forall h s s' f f' g p
+   . (Functor g, Ord p, RenderDSL h)
+  => RawParentComponentSpec h s s' f f' g p
+  -> RawComponent h (RawParentState h s s' f f' g p) (ParentQuery f f' p) g
 parentComponent spec =
   lifecycleParentComponent
     { render: spec.render
@@ -184,8 +191,8 @@ parentComponent spec =
 
 type RawLifecycleParentComponentSpec h s s' f f' g p =
   { render :: s -> ParentRendered h s' f f' g p
-  , eval :: f ~> ParentDSL s s' f f' g p
-  , peek :: forall x. Maybe (ChildF p f' x -> ParentDSL s s' f f' g p Unit)
+  , eval :: f ~> RawParentDSL h s s' f f' g p
+  , peek :: forall x. Maybe (ChildF p f' x -> RawParentDSL h s s' f f' g p Unit)
   , initializer :: Maybe (f Unit)
   , finalizer :: Maybe (f Unit)
   }
@@ -195,10 +202,10 @@ type LifecycleParentComponentSpec s s' f f' g p = RawLifecycleParentComponentSpe
 
 -- | Builds a component with lifecycle inputs that may contain child components.
 lifecycleParentComponent
-  :: forall s s' f f' g p
-   . (Functor g, Ord p)
-  => LifecycleParentComponentSpec s s' f f' g p
-  -> Component (ParentState s s' f f' g p) (ParentQuery f f' p) g
+  :: forall h s s' f f' g p
+   . (Functor g, Ord p, RenderDSL h)
+  => RawLifecycleParentComponentSpec h s s' f f' g p
+  -> RawComponent h (RawParentState h s s' f f' g p) (ParentQuery f f' p) g
 lifecycleParentComponent spec =
     RawComponent
     { render: renderParent spec.render
@@ -207,16 +214,16 @@ lifecycleParentComponent spec =
     , finalizers: parentFinalizers eval spec.finalizer
     }
   where
-  eval :: ParentQuery f f' p ~> ComponentDSL (ParentState s s' f f' g p) (ParentQuery f f' p) g
+  eval :: ParentQuery f f' p ~> ComponentDSL (RawParentState h s s' f f' g p) (ParentQuery f f' p) g
   eval = coproduct (queryParent spec.eval) case spec.peek of
     Nothing -> queryChild
     Just peek -> \q -> queryChild q <* queryParent peek q
 
 parentFinalizers
-  :: forall s s' f f' g p
-   . (ParentQuery f f' p ~> ComponentDSL (ParentState s s' f f' g p) (ParentQuery f f' p) g)
+  :: forall h s s' f f' g p
+   . (ParentQuery f f' p ~> ComponentDSL (RawParentState h s s' f f' g p) (ParentQuery f f' p) g)
   -> Maybe (f Unit)
-  -> ParentState s s' f f' g p
+  -> RawParentState h s s' f f' g p
   -> Array (Finalized g)
 parentFinalizers eval fin (ParentState s) =
   foldMap childFin s.children <> foldMap parentFin fin
@@ -224,33 +231,34 @@ parentFinalizers eval fin (ParentState s) =
   parentFin :: f Unit -> Array (Finalized g)
   parentFin i = [ finalized eval (parentState s.parent) (left i) ]
 
-  childFin :: ChildState s' f f' g p -> Array (Finalized g)
+  childFin :: RawChildState h s' f f' g p -> Array (Finalized g)
   childFin child = finalizeComponent child.component child.state
 
 -- | The type used by component containers for their state where `s` is the
 -- | state local to the container, `p` is the type of slot used by the
 -- | container, and the remaining parameters are the type variables for the
 -- | child components.
-newtype ParentState s s' f f' g p = ParentState
+newtype RawParentState h s s' f f' g p = ParentState
   { parent :: s
-  , children :: M.Map p (ChildState s' f f' g p)
+  , children :: M.Map p (RawChildState h s' f f' g p)
   }
 
-type ChildState s' f f' g p =
-  { component :: Component s' f' g
-  , state :: s'
-  , memo :: Maybe (Tree (ParentQuery f f' p) p)
-  }
+type RawChildState h s' f f' g p =
+    { component :: RawComponent h s' f' g
+    , state :: s'
+    , memo :: Maybe (Tree (ParentQuery f f' p) p)
+    }
 
 -- | Lifts a state value into an `ParentState` value. Useful when providing
 -- | an initial state value for a parent component.
-parentState :: forall s s' f f' g p. s -> ParentState s s' f f' g p
+parentState :: forall h s s' f f' g p. s -> RawParentState h s s' f f' g p
 parentState st = ParentState { parent: st, children: M.empty }
 
+type RawQueryF h s s' f f' g p = Free (HalogenF (RawParentState h s s' f f' g p) (ChildF p f') g)
 -- | An intermediate algebra that parent components "produce" from their `eval`
 -- | and `peek` functions. This takes the place of `g` when compared to a leaf
 -- | (non-parent) component.
-type QueryF s s' f f' g p = Free (HalogenF (ParentState s s' f f' g p) (ChildF p f') g)
+type QueryF s s' f f' g p = RawQueryF HTML s s' f f' g p
 
 -- | An intermediate algebra used to associate values from a child component's
 -- | algebra with the slot the component was installed into.
@@ -329,11 +337,11 @@ bracketQuery f = do
 -- | If a component is not found for the slot the result of the query
 -- | will be `Nothing`.
 mkQuery
-  :: forall s s' f f' p g i
+  :: forall h s s' f f' p g i
    . (Functor g, Ord p)
   => p
   -> f' i
-  -> QueryF s s' f f' g p (Maybe i)
+  -> RawQueryF h s s' f f' g p (Maybe i)
 mkQuery p q = bracketQuery do
   ParentState st <- get
   for (M.lookup p st.children) \child ->
@@ -383,7 +391,7 @@ liftQuery
   ~> ParentDSL s s' f f' g p
 liftQuery = liftH
 
-mapStateFParent :: forall s s' f f' g p. StateF s ~> StateF (ParentState s s' f f' g p)
+mapStateFParent :: forall h s s' f f' g p. StateF s ~> StateF (RawParentState h s s' f f' g p)
 mapStateFParent =
   mapState
     (\(ParentState st) -> st.parent)
@@ -392,7 +400,7 @@ mapStateFParent =
       , children: st.children
       })
 
-mapStateFChild :: forall s s' f f' g p. Ord p => p -> StateF s' ~> StateF (ParentState s s' f f' g p)
+mapStateFChild :: forall h s s' f f' g p. Ord p => p -> StateF s' ~> StateF (RawParentState h s s' f f' g p)
 mapStateFChild p =
   mapState
     (\(ParentState st) -> unsafePartial fromJust $ _.state <$> M.lookup p st.children)
@@ -401,38 +409,44 @@ mapStateFChild p =
       , children: M.update (\child -> Just { component: child.component, state: f child.state, memo: Nothing }) p st.children
       })
 
-type InstallState s' f f' g p = {
-    children:: M.Map p (ChildState s' f f' g p)
-  , removed :: M.Map p (ChildState s' f f' g p)
+
+type InstallState h s' f f' g p = {
+    children:: M.Map p (RawChildState h s' f f' g p)
+  , removed :: M.Map p (RawChildState h s' f f' g p)
   , hooks:: Array (Hook (ParentQuery f f' p) g)
   }
 
 renderParent
-  :: forall s s' f f' g p
-   . (Ord p)
-  => (s -> ParentHTML s' f f' g p)
-  -> (ParentState s s' f f' g p)
-  -> RenderResult HTML (ParentState s s' f f' g p) (ParentQuery f f' p) g
+  :: forall h s s' f f' g p
+   . (Ord p, RenderDSL h)
+  => (s -> ParentRendered h s' f f' g p)
+  -> (RawParentState h s s' f f' g p)
+  -> RenderResult h (RawParentState h s s' f f' g p) (ParentQuery f f' p) g
 renderParent render (ParentState curr) =
   case installChildren installChild left (render curr.parent) init of
     Tuple html acc ->
       { state: ParentState { parent: curr.parent, children: acc.children }
       , hooks: foldMap finalizeChild acc.removed <> acc.hooks
-      , tree:  mkTree $ defer \_ -> html
+      , tree:  makeTree $ defer \_ -> html
       }
 
   where
 
-  init :: InstallState s' f f' g p
+  init :: InstallState h s' f f' g p
   init =
     { children: M.empty
     , removed: curr.children
     , hooks: []
     }
 
+  finalizeChild :: RawChildState h s' f f' g p -> Array (Hook (ParentQuery f f' p) g)
   finalizeChild child =
     map Finalized $ finalizeComponent child.component child.state
 
+  installChild :: SlotCreator h
+    -> (RawSlotConstructor h s' f' g p)
+    -> InstallState h s' f f' g p
+    -> Tuple (h (Tree (ParentQuery f f' p) p) (ParentQuery f f' p Unit)) (InstallState h s' f f' g p)
   installChild slot (RawSlotConstructor p def) { hooks, removed, children } =
     case M.lookup p curr.children of
       Just child' ->
@@ -454,6 +468,9 @@ renderParent render (ParentState curr) =
       , hooks: hooks <> hs
       }
 
+    renderChild :: Maybe (Hook f' g)
+      -> RawChildState h s' f f' g p
+      -> Tuple (h (Tree (ParentQuery f f' p) p) (ParentQuery f f' p Unit)) (InstallState h s' f f' g p)
     renderChild _ c@{ memo : Just tree } =
       Tuple (slot $ thunkTree tree) (update [] c)
 
@@ -472,11 +489,11 @@ renderParent render (ParentState curr) =
             }
 
 queryParent
-  :: forall s s' f f' g p a q r
+  :: forall h s s' f f' g p a q r
    . (Functor g)
-  => (q a -> ParentDSL s s' f f' g p r)
+  => (q a -> RawParentDSL h s s' f f' g p r)
   -> q a
-  -> ComponentDSL (ParentState s s' f f' g p) (ParentQuery f f' p) g r
+  -> ComponentDSL (RawParentState h s s' f f' g p) (ParentQuery f f' p) g r
 queryParent f =
   f >>> foldFree \h ->
     case h of
@@ -488,21 +505,21 @@ queryParent f =
       RenderPendingHF k -> liftF $ RenderPendingHF k
       HaltHF -> liftF HaltHF
 
-mergeParentStateF :: forall s s' f f' g p. StateF s ~> ComponentDSL (ParentState s s' f f' g p) (ParentQuery f f' p) g
+mergeParentStateF :: forall h s s' f f' g p. StateF s ~> ComponentDSL (RawParentState h s s' f f' g p) (ParentQuery f f' p) g
 mergeParentStateF = liftF <<< StateHF <<< mapStateFParent
 
 liftChildF
-  :: forall s s' f f' g p
+  :: forall h s s' f f' g p
    . (Functor g)
-  => Free (HalogenF (ParentState s s' f f' g p) (ChildF p f') g)
-  ~> ComponentDSL (ParentState s s' f f' g p) (ParentQuery f f' p) g
+  => Free (HalogenF (RawParentState h s s' f f' g p) (ChildF p f') g)
+  ~> ComponentDSL (RawParentState h s s' f f' g p) (ParentQuery f f' p) g
 liftChildF = hoistFree (transformHF id right id)
 
 queryChild
-  :: forall s s' f f' g p
+  :: forall h s s' f f' g p
    . (Functor g, Ord p)
   => ChildF p f'
-  ~> ComponentDSL (ParentState s s' f f' g p) (ParentQuery f f' p) g
+  ~> ComponentDSL (RawParentState h s s' f f' g p) (ParentQuery f f' p) g
 queryChild (ChildF p q) =
   hoistFree (transformHF id right id) (mkQuery p q)
     >>= maybe (liftF HaltHF) pure
@@ -519,14 +536,14 @@ queryChild (ChildF p q) =
 -- | situation will only arise when the initial state is incorrect or a bad
 -- | externally constructed query is passed to the component.
 transform
-  :: forall s s' f f' g
+  :: forall h s s' f f' g
    . (Functor g)
   => (s -> s')
   -> (s' -> Maybe s)
   -> (f ~> f')
   -> (forall a. f' a -> Maybe (f a))
-  -> Component s f g
-  -> Component s' f' g
+  -> RawComponent h s f g
+  -> RawComponent h s' f' g
 transform reviewS previewS reviewQ previewQ (RawComponent c) =
     RawComponent
     { render: \st -> maybe (emptyResult st) render' (previewS st)
@@ -536,7 +553,7 @@ transform reviewS previewS reviewQ previewQ (RawComponent c) =
     }
   where
 
-  render' :: s -> RenderResult HTML s' f' g
+  render' :: s -> RenderResult h s' f' g
   render' st =
     case c.render st of
       { state, hooks, tree } ->
@@ -560,11 +577,11 @@ transform reviewS previewS reviewQ previewQ (RawComponent c) =
 
 -- | Transforms a `Component`'s types using a `ChildPath` definition.
 transformChild
-  :: forall s s' f f' g p p'
+  :: forall h s s' f f' g p p'
    . Functor g
   => ChildPath s s' f f' p p'
-  -> Component s f g
-  -> Component s' f' g
+  -> RawComponent h s f g
+  -> RawComponent h s' f' g
 transformChild i = transform (injState i) (prjState i) (injQuery i) (prjQuery i)
 
 -- | Changes the component's `g` type. A use case for this would be to interpret
@@ -594,22 +611,19 @@ interpret nat (RawComponent c) = RawComponent
 -- | Runs a component's `render` function with the specified state, returning
 -- | the generated `HTML` and new state.
 renderComponent
-  :: forall s f g
-   . Component s f g
+  :: forall h s f g
+   . RawComponent h s f g
   -> s
-  -> { state :: s
-     , hooks :: Array (Hook f g)
-     , tree  :: Tree f Unit
-     }
+  -> RenderResult h s f g
 renderComponent (RawComponent c) = c.render
 
 -- | Runs a compnent's `query` function with the specified query input and
 -- | returns the pending computation as a `Free` monad.
-queryComponent :: forall s f g. Component s f g -> f ~> ComponentDSL s f g
+queryComponent :: forall h s f g. RawComponent h s f g -> f ~> ComponentDSL s f g
 queryComponent (RawComponent c) = c.eval
 
-initializeComponent :: forall s f g. Component s f g -> Maybe (f Unit)
+initializeComponent :: forall h s f g. RawComponent h s f g -> Maybe (f Unit)
 initializeComponent (RawComponent c) = c.initializer
 
-finalizeComponent :: forall s f g. Component s f g -> s -> Array (Finalized g)
+finalizeComponent :: forall h s f g. RawComponent h s f g -> s -> Array (Finalized g)
 finalizeComponent (RawComponent c) = c.finalizers
